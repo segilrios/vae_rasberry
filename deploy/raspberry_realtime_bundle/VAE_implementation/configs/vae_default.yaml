@@ -1,0 +1,28 @@
+paths:
+  raw_dataset_dir: "data/raw/DataBase-RF-FM-88MHz-108MHz-Bogota-Funza"
+  processed_dir:   "data/processed/psd_1024"
+  models_dir:      "VAE_implementation/models"
+
+preprocess:
+  target_bins: 1024
+  normalize_mode: "global_minmax"   # global_minmax | per_frame_minmax | none
+  use_db_clip: false
+  db_min: -120.0
+  db_max: 10.0
+  split:
+    train: 0.80
+    val:   0.10
+    test:  0.10
+    mode: "time_ordered"            # time_ordered | random
+    seed: 2026
+
+train:
+  batch_size: 256
+  epochs: 5000
+  steps_multiplier: 4          # steps_per_epoch = ceil(N/B)*multiplier (para dataset pequeño)
+  lr: 5.0e-6
+  clipnorm: 1.0
+  beta_final: 1.0
+  beta_warmup_epochs: 80
+  resume: true                 # true=reanuda latest, false=arranca desde 0
+  run_name: "run_current"
