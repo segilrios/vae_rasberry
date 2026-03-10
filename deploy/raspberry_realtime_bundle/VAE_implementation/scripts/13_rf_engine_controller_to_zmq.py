@@ -16,6 +16,7 @@ Topologia:
 """
 
 import argparse
+import csv
 import json
 import time
 from pathlib import Path
@@ -47,6 +48,46 @@ def pick_psd(obj: dict, preferred_key: str | None) -> np.ndarray | None:
     return None
 
 
+def pick_scalar(obj: dict, key: str, default):
+    val = obj.get(key, default)
+    return default if val is None else val
+
+
+def open_capture_csv(csv_path: Path):
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    exists = csv_path.exists()
+    fh = csv_path.open("a", newline="", encoding="utf-8")
+    writer = csv.DictWriter(
+        fh,
+        fieldnames=[
+            "session_id",
+            "sensor_id",
+            "location_label",
+            "scenario_label",
+            "profile_label",
+            "timestamp",
+            "created_at",
+            "center_freq_hz",
+            "sample_rate_hz",
+            "rbw_hz",
+            "window",
+            "overlap",
+            "lna_gain",
+            "vga_gain",
+            "antenna_amp",
+            "antenna_port",
+            "decimation",
+            "start_freq_hz",
+            "end_freq_hz",
+            "pxx",
+            "notes",
+        ],
+    )
+    if not exists:
+        writer.writeheader()
+    return fh, writer
+
+
 def load_command_payload(cmd_json: str, cmd_file: str | None) -> dict:
     if cmd_file:
         p = Path(cmd_file)
@@ -72,6 +113,15 @@ def main():
     ap.add_argument("--send_cmd_every_s", type=float, default=1.0, help="0=send once at start.")
     ap.add_argument("--rf_rcv_timeout_ms", type=int, default=1000)
     ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--capture_csv", default=None, help="Optional CSV output compatible with 01_preprocess.py.")
+    ap.add_argument("--session_id", default="session_current")
+    ap.add_argument("--sensor_id", default="sensor_01")
+    ap.add_argument("--location_label", default="unknown")
+    ap.add_argument("--scenario_label", default="unspecified")
+    ap.add_argument("--profile_label", default="default_profile")
+    ap.add_argument("--decimation", type=int, default=1)
+    ap.add_argument("--notes", default="")
+    ap.add_argument("--flush_every", type=int, default=20)
     args = ap.parse_args()
 
     cmd = load_command_payload(args.cmd_json, args.cmd_file)
@@ -94,6 +144,12 @@ def main():
     rf_sock.send_string(cmd_msg)
     print("[CTRL13] initial command sent")
     last_cmd_t = time.perf_counter()
+
+    capture_fh = None
+    capture_writer = None
+    if args.capture_csv:
+        capture_fh, capture_writer = open_capture_csv(Path(args.capture_csv))
+        print(f"[CTRL13] capture_csv={args.capture_csv}")
 
     rx = 0
     fw = 0
@@ -123,6 +179,34 @@ def main():
             if psd is None:
                 continue
 
+            if capture_writer is not None:
+                row = {
+                    "session_id": args.session_id,
+                    "sensor_id": args.sensor_id,
+                    "location_label": args.location_label,
+                    "scenario_label": args.scenario_label,
+                    "profile_label": args.profile_label,
+                    "timestamp": pick_scalar(obj, "timestamp", int(time.time() * 1000)),
+                    "created_at": int(time.time() * 1000),
+                    "center_freq_hz": pick_scalar(obj, "center_freq_hz", cmd.get("center_freq_hz")),
+                    "sample_rate_hz": pick_scalar(obj, "sample_rate_hz", cmd.get("sample_rate_hz")),
+                    "rbw_hz": pick_scalar(obj, "rbw_hz", cmd.get("rbw_hz")),
+                    "window": pick_scalar(obj, "window", cmd.get("window")),
+                    "overlap": pick_scalar(obj, "overlap", cmd.get("overlap")),
+                    "lna_gain": pick_scalar(obj, "lna_gain", cmd.get("lna_gain")),
+                    "vga_gain": pick_scalar(obj, "vga_gain", cmd.get("vga_gain")),
+                    "antenna_amp": pick_scalar(obj, "antenna_amp", cmd.get("antenna_amp")),
+                    "antenna_port": pick_scalar(obj, "antenna_port", cmd.get("antenna_port")),
+                    "decimation": args.decimation,
+                    "start_freq_hz": pick_scalar(obj, "start_freq_hz", None),
+                    "end_freq_hz": pick_scalar(obj, "end_freq_hz", None),
+                    "pxx": json.dumps(psd.tolist(), separators=(",", ":")),
+                    "notes": args.notes,
+                }
+                capture_writer.writerow(row)
+                if args.flush_every > 0 and (fw + 1) % args.flush_every == 0:
+                    capture_fh.flush()
+
             out_obj = {args.out_key: psd.tolist()}
             out_sock.send_string(json.dumps(out_obj))
             fw += 1
@@ -142,6 +226,9 @@ def main():
             out_sock.close(0)
         except Exception:
             pass
+        if capture_fh is not None:
+            capture_fh.flush()
+            capture_fh.close()
 
     print("[CTRL13] stopped.")
 
