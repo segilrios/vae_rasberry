@@ -148,6 +148,12 @@ def main():
     ap.add_argument("--run_name", default=None)
 
     ap.add_argument("--ipc", default="ipc:///tmp/ane_psd.ipc")
+    ap.add_argument(
+        "--ipc_mode",
+        choices=["connect", "bind"],
+        default="bind",
+        help="ZMQ mode for PSD IPC (default: bind). Use connect if the producer binds.",
+    )
     ap.add_argument("--psd_key", default=None)
 
     ap.add_argument("--dest_ip", required=True)
@@ -158,6 +164,11 @@ def main():
     ap.add_argument("--log_every_packets", type=int, default=10)
     ap.add_argument("--already_normalized", action="store_true")
     ap.add_argument("--send_minmax", action="store_true")
+    ap.add_argument(
+        "--send_orig",
+        action="store_true",
+        help="Include original PSD frames in packets for realtime comparison.",
+    )
     ap.add_argument("--packet_interval_ms", type=float, default=0.0)
     args = ap.parse_args()
 
@@ -208,12 +219,17 @@ def main():
 
     ctx = zmq.Context.instance()
     zs = ctx.socket(zmq.PAIR)
-    zs.bind(args.ipc)
+    if args.ipc_mode == "bind":
+        zs.bind(args.ipc)
+    else:
+        zs.connect(args.ipc)
     zs.RCVTIMEO = 1000
 
     send_minmax = bool(args.send_minmax or normalize_mode == "per_frame_minmax")
+    send_orig = bool(args.send_orig)
+    mode_label = "bind" if args.ipc_mode == "bind" else "connect"
     print(
-        f"[EDGE11] ZMQ bind {args.ipc} | UDP -> {args.dest_ip}:{args.port} | {tag} "
+        f"[EDGE11] ZMQ {mode_label} {args.ipc} | UDP -> {args.dest_ip}:{args.port} | {tag} "
         f"{'minmax' if send_minmax else 'no-minmax'}"
     )
 
@@ -225,6 +241,7 @@ def main():
     mu_block = np.zeros((L, 32), dtype=np.int8)
     mm_min_block = np.zeros((L,), dtype=np.float32)
     mm_max_block = np.zeros((L,), dtype=np.float32)
+    orig_block = np.zeros((L, 1024), dtype=np.float32)
     bi = 0
 
     last_send_t = time.perf_counter()
@@ -264,6 +281,8 @@ def main():
                 frame_min, frame_max = 0.0, 1.0
             mm_min_block[bi] = float(frame_min)
             mm_max_block[bi] = float(frame_max)
+        if send_orig:
+            orig_block[bi] = x.astype(np.float32, copy=False)
         bi += 1
         frames += 1
 
@@ -273,6 +292,10 @@ def main():
                 mm_max = mm_max_block.copy()
             else:
                 mm_min = mm_max = None
+            if send_orig:
+                x_orig = orig_block.copy()
+            else:
+                x_orig = None
             pkt = packmod.pack_packet(
                 mu_block,
                 seq=seq,
@@ -280,6 +303,7 @@ def main():
                 keyframe=True,
                 frame_min=mm_min,
                 frame_max=mm_max,
+                x_orig=x_orig,
             )
             udp.sendto(pkt, dest)
             bytes_total += len(pkt)

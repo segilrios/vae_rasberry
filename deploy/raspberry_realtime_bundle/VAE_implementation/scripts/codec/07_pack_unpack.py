@@ -48,6 +48,7 @@ HDR_SIZE = HDR_STRUCT.size  # 24 bytes
 
 FLAG_KEYFRAME = 1 << 0  # block contains absolute mu0
 FLAG_HAS_MINMAX = 1 << 1  # payload includes per-frame min/max (float16)
+FLAG_HAS_ORIG = 1 << 2  # payload includes original PSD frames (float16)
 
 
 @dataclass
@@ -149,6 +150,23 @@ def _decode_minmax_block(raw: bytes, offset: int, L: int) -> Tuple[np.ndarray, n
     return frame_min, frame_max
 
 
+def _encode_orig_block(x_orig: np.ndarray) -> bytes:
+    if x_orig.ndim != 2 or x_orig.shape[1] != 1024:
+        raise ValueError("x_orig must have shape (L,1024)")
+    return x_orig.astype("<f2", copy=False).tobytes()
+
+
+def _decode_orig_block(raw: bytes, offset: int, L: int) -> np.ndarray:
+    expected = L * 1024 * 2  # float16
+    if len(raw) < offset + expected:
+        raise ValueError("Truncated orig block")
+    return (
+        np.frombuffer(raw[offset : offset + expected], dtype="<f2")
+        .reshape(L, 1024)
+        .astype(np.float32, copy=False)
+    )
+
+
 def pack_packet(
     mu_block: np.ndarray,
     seq: int,
@@ -157,6 +175,7 @@ def pack_packet(
     keyframe: bool = True,
     frame_min: Optional[np.ndarray] = None,
     frame_max: Optional[np.ndarray] = None,
+    x_orig: Optional[np.ndarray] = None,
 ) -> bytes:
     """
     Build a packet:
@@ -174,14 +193,21 @@ def pack_packet(
 
     raw_block = encode_mu_block(mu_block)
     has_minmax = frame_min is not None and frame_max is not None
+    has_orig = x_orig is not None
     if has_minmax:
         raw_block += _encode_minmax_block(
             np.asarray(frame_min, dtype=np.float32),
             np.asarray(frame_max, dtype=np.float32),
         )
+    if has_orig:
+        raw_block += _encode_orig_block(np.asarray(x_orig, dtype=np.float32))
     payload = zlib.compress(raw_block, level=zlib_level)
 
-    flags = (FLAG_KEYFRAME if keyframe else 0) | (FLAG_HAS_MINMAX if has_minmax else 0)
+    flags = (
+        (FLAG_KEYFRAME if keyframe else 0)
+        | (FLAG_HAS_MINMAX if has_minmax else 0)
+        | (FLAG_HAS_ORIG if has_orig else 0)
+    )
     reserved = 0
 
     header = HDR_STRUCT.pack(
@@ -234,7 +260,7 @@ def decode_packet_to_mu(pkt: bytes) -> Tuple[PacketHeader, np.ndarray]:
 
 def decode_packet_to_mu_and_minmax(
     pkt: bytes,
-) -> Tuple[PacketHeader, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+) -> Tuple[PacketHeader, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Full decode: packet -> zlib decompress -> mu_block int8 (L,32) + optional min/max.
     Returns: (hdr, mu_block, frame_min, frame_max)
@@ -243,13 +269,21 @@ def decode_packet_to_mu_and_minmax(
     raw = zlib.decompress(payload)
     mu = decode_mu_block(raw)
 
+    frame_min = frame_max = None
+    x_orig = None
     if hdr.flags & FLAG_HAS_MINMAX:
         L = int(mu.shape[0])
         mu_raw_len = 1 + 32 + (L - 1) * 32
         frame_min, frame_max = _decode_minmax_block(raw, mu_raw_len, L)
-        return hdr, mu, frame_min, frame_max
+        offset = mu_raw_len + (L * 2 * 2)
+    else:
+        offset = 1 + 32 + (int(mu.shape[0]) - 1) * 32
 
-    return hdr, mu, None, None
+    if hdr.flags & FLAG_HAS_ORIG:
+        L = int(mu.shape[0])
+        x_orig = _decode_orig_block(raw, offset, L)
+
+    return hdr, mu, frame_min, frame_max, x_orig
 
 
 # -----------------------------
