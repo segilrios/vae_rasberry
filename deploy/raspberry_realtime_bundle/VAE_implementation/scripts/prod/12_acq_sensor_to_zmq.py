@@ -1,15 +1,15 @@
-﻿#!/usr/bin/env python3
-"""
-12_acq_sensor_to_zmq.py - Adaptador de adquisicion externa -> ZMQ IPC JSON PSD.
+#!/usr/bin/env python3
+"""Bridge an external PSD producer into the repository ZMQ JSON stream.
 
-Objetivo:
-- Integrar librerias/scripts de adquisicion SDR externos (ej. SDR-SpectrumMonitoring-Sensor)
-- Publicar PSD en el endpoint IPC que consumen:
-  - 11_edge_hackrf_psd_zmq_to_udp.py
+This adapter keeps the edge bridge contract narrow:
+- ingest PSD frames from an external Python callable or stdout-emitting script,
+- normalize the payload into a 1D float array,
+- publish JSON messages to the IPC endpoint consumed by
+  ``11_edge_hackrf_psd_zmq_to_udp.py``.
 
-Modos:
-1) callable: importa un callable python (modulo:funcion).
-2) script: ejecuta un script/proceso que emite JSON por stdout (1 JSON por linea).
+Supported modes:
+1. ``callable`` imports a Python callable via ``module:function``.
+2. ``script`` launches a process that prints one JSON object per line.
 """
 
 import argparse
@@ -26,10 +26,21 @@ import numpy as np
 import zmq
 
 
-DEFAULT_KEYS = ("psd_dbm", "psd", "p_out", "power_dbm", "p_dbm", "spectrum_dbm", "bins_dbm", "pxx")
+DEFAULT_KEYS = (
+    "psd_dbm",
+    "psd",
+    "p_out",
+    "power_dbm",
+    "p_dbm",
+    "spectrum_dbm",
+    "bins_dbm",
+    "pxx",
+)
 
 
 def _to_np1d(x: Any) -> np.ndarray | None:
+    """Convert one PSD-like payload into a flat ``float32`` NumPy array."""
+
     try:
         arr = np.asarray(x, dtype=np.float32).reshape(-1)
         if arr.size == 0:
@@ -40,6 +51,8 @@ def _to_np1d(x: Any) -> np.ndarray | None:
 
 
 def extract_psd(frame: Any, preferred_key: str | None) -> np.ndarray | None:
+    """Extract the PSD vector from one frame using the configured key priority."""
+
     if isinstance(frame, dict):
         if preferred_key and preferred_key in frame:
             return _to_np1d(frame[preferred_key])
@@ -51,8 +64,10 @@ def extract_psd(frame: Any, preferred_key: str | None) -> np.ndarray | None:
 
 
 def resolve_callable(target: str):
+    """Resolve a ``module:function`` target into a live Python callable."""
+
     if ":" not in target:
-        raise ValueError("callable must be in format module:function")
+        raise ValueError("Callable targets must use the format module:function")
     mod_name, fn_name = target.split(":", 1)
     mod = importlib.import_module(mod_name)
     fn = getattr(mod, fn_name, None)
@@ -62,6 +77,8 @@ def resolve_callable(target: str):
 
 
 def add_repo_to_syspath(repo_path: str | None):
+    """Prepend the external repository path to ``sys.path`` when requested."""
+
     if not repo_path:
         return
     p = Path(repo_path).resolve()
@@ -73,6 +90,8 @@ def add_repo_to_syspath(repo_path: str | None):
 
 
 def iter_from_callable(fn, kwargs: dict) -> Iterator[Any]:
+    """Yield frames from a callable, iterable object, or polling function."""
+
     obj = fn(**kwargs)
 
     if isinstance(obj, Iterator):
@@ -80,7 +99,9 @@ def iter_from_callable(fn, kwargs: dict) -> Iterator[Any]:
             yield item
         return
 
-    if isinstance(obj, Iterable) and not isinstance(obj, (dict, list, tuple, np.ndarray, str, bytes)):
+    if isinstance(obj, Iterable) and not isinstance(
+        obj, (dict, list, tuple, np.ndarray, str, bytes)
+    ):
         for item in obj:
             yield item
         return
@@ -91,6 +112,8 @@ def iter_from_callable(fn, kwargs: dict) -> Iterator[Any]:
 
 
 def iter_from_script(command: str) -> Iterator[Any]:
+    """Yield JSON-decoded frames from a stdout-emitting subprocess."""
+
     proc = subprocess.Popen(
         shlex.split(command),
         stdout=subprocess.PIPE,
@@ -109,8 +132,7 @@ def iter_from_script(command: str) -> Iterator[Any]:
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
-                # logs del proceso externo: se imprimen para debug y se ignoran
-                print(f"[ACQ13] passthrough: {line}")
+                print(f"[ACQ12] passthrough: {line}")
     finally:
         proc.terminate()
         try:
@@ -120,18 +142,40 @@ def iter_from_script(command: str) -> Iterator[Any]:
 
 
 def main():
+    """Parse CLI arguments and relay external PSD frames into the IPC stream."""
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["callable", "script"], required=True)
-    ap.add_argument("--ipc", default="ipc:///tmp/ane_psd.ipc", help="PAIR endpoint where edge script is bound.")
-    ap.add_argument("--out_key", default="psd_dbm", help="JSON key emitted to edge bridge.")
-    ap.add_argument("--in_key", default=None, help="Preferred input key in source frames.")
-    ap.add_argument("--sleep_ms", type=float, default=0.0, help="Throttle optional publisher delay.")
+    ap.add_argument(
+        "--ipc",
+        default="ipc:///tmp/ane_psd.ipc",
+        help="PAIR endpoint where edge script is bound.",
+    )
+    ap.add_argument(
+        "--out_key", default="psd_dbm", help="JSON key emitted to edge bridge."
+    )
+    ap.add_argument(
+        "--in_key", default=None, help="Preferred input key in source frames."
+    )
+    ap.add_argument(
+        "--sleep_ms", type=float, default=0.0, help="Throttle optional publisher delay."
+    )
     ap.add_argument("--log_every", type=int, default=100)
 
-    ap.add_argument("--sensor_repo_path", default=None, help="Path to external sensor repo to append to sys.path.")
-    ap.add_argument("--callable", dest="callable_target", default=None, help="module:function")
-    ap.add_argument("--callable_kwargs_json", default="{}", help="JSON dict kwargs for callable.")
-    ap.add_argument("--script_cmd", default=None, help="Command producing JSON lines with PSD.")
+    ap.add_argument(
+        "--sensor_repo_path",
+        default=None,
+        help="Path to external sensor repo to append to sys.path.",
+    )
+    ap.add_argument(
+        "--callable", dest="callable_target", default=None, help="module:function"
+    )
+    ap.add_argument(
+        "--callable_kwargs_json", default="{}", help="JSON dict kwargs for callable."
+    )
+    ap.add_argument(
+        "--script_cmd", default=None, help="Command producing JSON lines with PSD."
+    )
     args = ap.parse_args()
 
     if args.mode == "callable" and not args.callable_target:
@@ -153,7 +197,7 @@ def main():
     ctx = zmq.Context.instance()
     zs = ctx.socket(zmq.PAIR)
     zs.connect(args.ipc)
-    print(f"[ACQ13] mode={args.mode} -> connect {args.ipc} out_key={args.out_key}")
+    print(f"[ACQ12] mode={args.mode} -> connected to {args.ipc} out_key={args.out_key}")
 
     n = 0
     t0 = time.perf_counter()
@@ -173,12 +217,12 @@ def main():
 
             if args.log_every > 0 and (n % args.log_every == 0):
                 dt = max(1e-9, time.perf_counter() - t0)
-                print(f"[ACQ13] sent={n} fps={n/dt:.1f} bins={psd.shape[0]}")
+                print(f"[ACQ12] sent={n} fps={n / dt:.1f} bins={psd.shape[0]}")
 
     except KeyboardInterrupt:
         pass
 
-    print("[ACQ13] stopped.")
+    print("[ACQ12] stopped.")
 
 
 if __name__ == "__main__":

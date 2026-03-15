@@ -5,7 +5,7 @@ paths:
 
 preprocess:
   target_bins: 1024
-  normalize_mode: "global_minmax"   # global_minmax | per_frame_minmax | none
+  normalize_mode: "per_frame_minmax"   # global_minmax | per_frame_minmax | none
   use_db_clip: false
   db_min: -120.0
   db_max: 10.0
@@ -18,11 +18,16 @@ preprocess:
 
 train:
   batch_size: 256
-  epochs: 5000
-  steps_multiplier: 4          # steps_per_epoch = ceil(N/B)*multiplier (para dataset pequeño)
-  lr: 5.0e-6
+  epochs: 200
+  steps_multiplier: 4
+  lr: 3.0e-4
   clipnorm: 1.0
   beta_final: 1.0
   beta_warmup_epochs: 80
-  resume: true                 # true=reanuda latest, false=arranca desde 0
-  run_name: "run_current"
+  resume: true
+  run_name: "run_fm_ext_001_peak_v4"
+  use_peaky_5050: true
+  peaky_quantile: 0.80
+  seed: 2026
+  include_dense128: true
+
